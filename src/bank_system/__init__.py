@@ -13,7 +13,7 @@ from .audit import (
     RiskLevel,
     RiskReason,
 )
-from .bank import Bank, Client, ClientStatus, SecurityEvent
+from .bank import BalancePoint, Bank, Client, ClientStatus, SecurityEvent
 from .exceptions import (
     AccessDeniedError,
     AccountClosedError,
@@ -25,6 +25,7 @@ from .exceptions import (
     RetryableTransactionError,
     RiskBlockedError,
 )
+from .reports import Report, ReportBuilder, ReportKind
 from .transactions import (
     ProcessingError,
     Transaction,
@@ -48,6 +49,7 @@ __all__ = [
     "AuditSeverity",
     "Bank",
     "BankAccount",
+    "BalancePoint",
     "Client",
     "ClientStatus",
     "Currency",
@@ -58,6 +60,9 @@ __all__ = [
     "ProcessingError",
     "PremiumAccount",
     "RetryableTransactionError",
+    "Report",
+    "ReportBuilder",
+    "ReportKind",
     "RiskAnalyzer",
     "RiskAssessment",
     "RiskBlockedError",

@@ -1,5 +1,6 @@
 """Клиенты, управление счетами и учебные правила доступа к банку."""
 
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -33,6 +34,18 @@ class SecurityEvent:
     client_id: str
     action: str
     reason: str
+
+
+@dataclass(frozen=True)
+class BalancePoint:
+    """Остаток счёта после успешной операции банка."""
+
+    occurred_at: datetime
+    account_number: str
+    balance: Decimal
+    total_value: Decimal
+    currency: Currency
+    operation: str
 
 
 class Client:
@@ -141,10 +154,59 @@ class Bank:
         self._accounts: dict[str, BankAccount] = {}
         self._clock = clock or datetime.now
         self._security_events: list[SecurityEvent] = []
+        self._balance_history: list[BalancePoint] = []
 
     @property
     def security_events(self) -> tuple[SecurityEvent, ...]:
         return tuple(self._security_events)
+
+    def current_time(self) -> datetime:
+        return self._clock()
+
+    def _record_balance(self, account: BankAccount, operation: str) -> None:
+        self._balance_history.append(
+            BalancePoint(
+                self._clock(), account.account_number, account.balance,
+                account.total_value, account.currency, operation,
+            )
+        )
+
+    def get_balance_history(
+        self, client_id: str, password: str, account_number: str
+    ) -> tuple[BalancePoint, ...]:
+        """Показать клиенту снимки его счёта после проверки пароля."""
+        client = self._authorized_client(client_id, password)
+        self._owned_account(client, account_number)
+        return tuple(
+            point for point in self._balance_history
+            if point.account_number == account_number
+        )
+
+    def get_client_profile(self, client_id: str, password: str) -> dict[str, str]:
+        """Вернуть основные данные вошедшего клиента для его отчёта."""
+        client = self._authorized_client(client_id, password)
+        return {
+            "client_id": client.client_id,
+            "full_name": client.full_name,
+            "status": client.status.value,
+        }
+
+    def get_account_statistics(self) -> dict[str, object]:
+        """Сводка без персональных данных для внутренних отчётов банка."""
+        accounts = tuple(self._accounts.values())
+        return {
+            "clients": len(self._clients),
+            "accounts": len(accounts),
+            "by_type": dict(sorted(Counter(
+                type(account).__name__ for account in accounts
+            ).items())),
+            "by_status": dict(sorted(Counter(
+                account.status.value for account in accounts
+            ).items())),
+            "by_currency": dict(sorted(Counter(
+                account.currency.value for account in accounts
+            ).items())),
+        }
 
     def add_client(
         self,
@@ -230,6 +292,7 @@ class Bank:
             raise InvalidOperationError("Номер счёта уже используется")
         self._accounts[account.account_number] = account
         client._add_account(account.account_number)
+        self._record_balance(account, "open")
         return account.account_number
 
     def close_account(
@@ -238,7 +301,9 @@ class Bank:
         account = self._account_operation(
             client_id, password, account_number, "close_account"
         )
-        return account.close()
+        payout = account.close()
+        self._record_balance(account, "close")
+        return payout
 
     def freeze_account(
         self, client_id: str, password: str, account_number: str
@@ -262,7 +327,9 @@ class Bank:
         account = self._account_operation(
             client_id, password, account_number, "deposit"
         )
-        return account.deposit(amount)
+        balance = account.deposit(amount)
+        self._record_balance(account, "deposit")
+        return balance
 
     def withdraw(
         self, client_id: str, password: str, account_number: str, amount: Amount
@@ -270,7 +337,9 @@ class Bank:
         account = self._account_operation(
             client_id, password, account_number, "withdraw"
         )
-        return account.withdraw(amount)
+        balance = account.withdraw(amount)
+        self._record_balance(account, "withdraw")
+        return balance
 
     def _transfer(
         self,
@@ -293,6 +362,8 @@ class Bank:
         new_recipient_balance = recipient.balance + received
         sender._balance = new_sender_balance
         recipient._balance = new_recipient_balance
+        self._record_balance(sender, "transfer_out")
+        self._record_balance(recipient, "transfer_in")
 
     def allocate_to_asset(
         self,
@@ -307,7 +378,9 @@ class Bank:
         )
         if not isinstance(account, InvestmentAccount):
             raise InvalidOperationError("Это не инвестиционный счёт")
-        return account.allocate_to_asset(asset_type, amount)
+        allocated = account.allocate_to_asset(asset_type, amount)
+        self._record_balance(account, "allocate_to_asset")
+        return allocated
 
     def release_from_asset(
         self,
@@ -322,7 +395,9 @@ class Bank:
         )
         if not isinstance(account, InvestmentAccount):
             raise InvalidOperationError("Это не инвестиционный счёт")
-        return account.release_from_asset(asset_type, amount)
+        remaining = account.release_from_asset(asset_type, amount)
+        self._record_balance(account, "release_from_asset")
+        return remaining
 
     def apply_monthly_interest(
         self, client_id: str, password: str, account_number: str
@@ -332,7 +407,9 @@ class Bank:
         )
         if not isinstance(account, SavingsAccount):
             raise InvalidOperationError("Это не сберегательный счёт")
-        return account.apply_monthly_interest()
+        interest = account.apply_monthly_interest()
+        self._record_balance(account, "interest")
+        return interest
 
     def search_accounts(
         self,
