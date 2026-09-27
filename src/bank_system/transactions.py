@@ -338,10 +338,10 @@ class TransactionProcessor:
         self.max_attempts = max_attempts
         self.retry_delay = retry_delay
         self.before_transfer = before_transfer
-        if audit_log is None and risk_analyzer is not None:
-            audit_log = AuditLog()
-        self.audit_log = audit_log
-        self.risk_analyzer = risk_analyzer
+        selected_log = audit_log if audit_log is not None else bank.audit_log
+        selected_risk = (
+            risk_analyzer if risk_analyzer is not None else bank.risk_analyzer
+        )
         self.exchange_rates: dict[tuple[Currency, Currency], Decimal] = {}
         for pair, value in (exchange_rates or {}).items():
             if (
@@ -351,6 +351,15 @@ class TransactionProcessor:
             ):
                 raise InvalidOperationError("Ключ курса: пара валют Currency")
             self.exchange_rates[pair] = _valid_amount(value)
+        bank._bind_risk_context(selected_log, selected_risk)
+
+    @property
+    def audit_log(self) -> AuditLog:
+        return self.bank.audit_log
+
+    @property
+    def risk_analyzer(self) -> RiskAnalyzer:
+        return self.bank.risk_analyzer
 
     def submit(
         self,
@@ -366,8 +375,6 @@ class TransactionProcessor:
     ) -> Transaction:
         """Проверить владельца отправляющего счёта и поставить перевод в очередь."""
         client = self.bank._authorized_client(client_id, password)
-        if self.risk_analyzer is None:
-            self.bank._ensure_operating_hours(client, "submit_transaction")
         source = self.bank._owned_account(client, sender)
         if recipient not in self.bank._accounts:
             raise InvalidOperationError("Счёт получателя не найден")
@@ -387,24 +394,23 @@ class TransactionProcessor:
             priority=priority,
             client_id=client_id,
         )
-        if self.risk_analyzer is not None:
-            assessment = self.risk_analyzer.assess(
-                client_id, transaction.transaction_id, transaction.amount,
-                transaction.currency, recipient, now,
-            )
-            self.risk_analyzer.record_attempt(
-                client_id, transaction.transaction_id, now
-            )
-            self._record_assessment(transaction, assessment, now, "submission")
-            try:
-                self.bank._ensure_operating_hours(client, "submit_transaction")
-            except OperatingHoursError as exc:
-                self._record_block(transaction, now, exc)
-                raise
-            if assessment.level is RiskLevel.HIGH:
-                error = RiskBlockedError("Перевод заблокирован: высокий риск")
-                self._record_block(transaction, now, error)
-                raise error
+        assessment = self.risk_analyzer.assess(
+            client_id, transaction.transaction_id, transaction.amount,
+            transaction.currency, recipient, now,
+        )
+        self.risk_analyzer.record_attempt(
+            client_id, transaction.transaction_id, now
+        )
+        self._record_assessment(transaction, assessment, now, "submission")
+        try:
+            self.bank._ensure_operating_hours(client, "submit_transaction")
+        except OperatingHoursError as exc:
+            self._record_block(transaction, now, exc)
+            raise
+        if assessment.level is RiskLevel.HIGH:
+            error = RiskBlockedError("Перевод заблокирован: высокий риск")
+            self._record_block(transaction, now, error)
+            raise error
         self.queue.add(transaction)
         self._approved_transactions[transaction.transaction_id] = transaction
         self._audit(
@@ -441,8 +447,6 @@ class TransactionProcessor:
     ) -> tuple[AuditEntry, ...]:
         """Показать клиенту его подозрительные попытки после проверки пароля."""
         self.bank._authorized_client(client_id, password)
-        if self.audit_log is None:
-            return ()
         return AuditReporter(self.audit_log).suspicious_operations(client_id)
 
     def process_ready(self, limit: int | None = None) -> list[Transaction]:
@@ -473,21 +477,20 @@ class TransactionProcessor:
             if client is None or client.status is not ClientStatus.ACTIVE:
                 raise AuthenticationError("Отправитель не найден или заблокирован")
             sender = self.bank._owned_account(client, transaction.sender)
-            if self.risk_analyzer is not None:
-                assessment = self.risk_analyzer.assess(
-                    transaction.client_id, transaction.transaction_id,
-                    transaction.amount, transaction.currency,
-                    transaction.recipient, now,
+            assessment = self.risk_analyzer.assess(
+                transaction.client_id, transaction.transaction_id,
+                transaction.amount, transaction.currency,
+                transaction.recipient, now,
+            )
+            if assessment.level is RiskLevel.HIGH:
+                self._record_assessment(
+                    transaction, assessment, now, "execution"
                 )
-                if assessment.level is RiskLevel.HIGH:
-                    self._record_assessment(
-                        transaction, assessment, now, "execution"
-                    )
-                    error = RiskBlockedError(
-                        "Перевод заблокирован перед исполнением: высокий риск"
-                    )
-                    self._record_block(transaction, now, error)
-                    raise error
+                error = RiskBlockedError(
+                    "Перевод заблокирован перед исполнением: высокий риск"
+                )
+                self._record_block(transaction, now, error)
+                raise error
             recipient = self.bank._accounts[transaction.recipient]
             if sender.currency is not transaction.currency:
                 raise InvalidOperationError("Валюта отправителя изменилась")
@@ -512,10 +515,9 @@ class TransactionProcessor:
                 transaction.amount, received, fee,
             )
             transaction._complete(now, received)
-            if self.risk_analyzer is not None:
-                self.risk_analyzer.record_success(
-                    transaction.client_id, transaction.recipient
-                )
+            self.risk_analyzer.record_success(
+                transaction.client_id, transaction.recipient
+            )
             self._audit(
                 AuditEventType.TRANSACTION_COMPLETED, AuditSeverity.INFO,
                 transaction, now,
@@ -556,11 +558,10 @@ class TransactionProcessor:
         now: datetime,
         details: Mapping[str, str] | None = None,
     ) -> None:
-        if self.audit_log is not None:
-            self.audit_log.record(
-                event_type, severity, transaction.client_id,
-                transaction.transaction_id, now, details,
-            )
+        self.audit_log.record(
+            event_type, severity, transaction.client_id,
+            transaction.transaction_id, now, details,
+        )
 
     def _record_assessment(
         self,

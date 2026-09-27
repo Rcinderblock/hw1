@@ -29,6 +29,9 @@ class AuditEventType(str, Enum):
     TRANSACTION_FAILED = "transaction_failed"
     RETRY_SCHEDULED = "retry_scheduled"
     TRANSACTION_CANCELLED = "transaction_cancelled"
+    WITHDRAWAL_COMPLETED = "withdrawal_completed"
+    WITHDRAWAL_FAILED = "withdrawal_failed"
+    WITHDRAWAL_BLOCKED = "withdrawal_blocked"
 
 
 _SEVERITY_ORDER = {
@@ -244,6 +247,39 @@ class RiskAnalyzer:
             level = RiskLevel.LOW
         return RiskAssessment(level, tuple(reasons))
 
+    def assess_withdrawal(
+        self,
+        client_id: str,
+        operation_id: str,
+        amount: Amount,
+        currency: Currency,
+        at: datetime,
+    ) -> RiskAssessment:
+        """Оценить прямое снятие без вымышленного получателя перевода."""
+        value = _valid_amount(amount)
+        if not isinstance(currency, Currency) or not isinstance(at, datetime):
+            raise InvalidOperationError("Неверная валюта или время оценки")
+        reasons: list[RiskReason] = []
+        if value >= self.large_amounts[currency]:
+            reasons.append(RiskReason.LARGE_AMOUNT)
+        cutoff = at - self.window
+        recent = sum(
+            1 for when, other_id in self._attempts.get(client_id, ())
+            if other_id != operation_id and cutoff <= when <= at
+        )
+        if recent + 1 >= self.frequent_count:
+            reasons.append(RiskReason.FREQUENT_OPERATIONS)
+        if 0 <= at.hour < 5:
+            reasons.append(RiskReason.NIGHT_OPERATION)
+        # Выдача крупной суммы наличными получает высокий риск без получателя.
+        if RiskReason.LARGE_AMOUNT in reasons or RiskReason.NIGHT_OPERATION in reasons:
+            level = RiskLevel.HIGH
+        elif reasons:
+            level = RiskLevel.MEDIUM
+        else:
+            level = RiskLevel.LOW
+        return RiskAssessment(level, tuple(reasons))
+
     def record_attempt(
         self, client_id: str, transaction_id: str, at: datetime
     ) -> None:
@@ -315,9 +351,15 @@ class AuditReporter:
         }
 
     def error_statistics(self) -> dict[str, object]:
-        failures = self.log.filter(event_type=AuditEventType.TRANSACTION_FAILED)
+        failures = (
+            *self.log.filter(event_type=AuditEventType.TRANSACTION_FAILED),
+            *self.log.filter(event_type=AuditEventType.WITHDRAWAL_FAILED),
+        )
         retries = self.log.filter(event_type=AuditEventType.RETRY_SCHEDULED)
-        blocked = self.log.filter(event_type=AuditEventType.TRANSACTION_BLOCKED)
+        blocked = (
+            *self.log.filter(event_type=AuditEventType.TRANSACTION_BLOCKED),
+            *self.log.filter(event_type=AuditEventType.WITHDRAWAL_BLOCKED),
+        )
         by_type = Counter(
             entry.details.get("error_type", "UnknownError")
             for entry in (*failures, *retries, *blocked)

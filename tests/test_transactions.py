@@ -11,6 +11,7 @@ from bank_system import (
     InvalidOperationError,
     OperatingHoursError,
     PremiumAccount,
+    RiskAnalyzer,
     RetryableTransactionError,
     SavingsAccount,
     TransactionProcessor,
@@ -23,7 +24,13 @@ from bank_system import (
 class TransactionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.time = datetime(2026, 1, 1, 12, 0)
-        self.bank = Bank(clock=lambda: self.time)
+        self.bank = Bank(
+            clock=lambda: self.time,
+            risk_analyzer=RiskAnalyzer(
+                large_amounts={currency: "100000" for currency in Currency},
+                frequent_count=100,
+            ),
+        )
         self.alice = self.bank.add_client(
             "Анна Иванова", 30, {"email": "anna@example.test"}, "alice"
         )

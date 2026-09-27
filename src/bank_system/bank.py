@@ -13,11 +13,20 @@ from uuid import uuid4
 
 from .accounts import AccountStatus, Amount, BankAccount, Currency, _valid_amount
 from .advanced_accounts import InvestmentAccount, SavingsAccount
+from .audit import (
+    AuditEventType,
+    AuditLog,
+    AuditSeverity,
+    RiskAnalyzer,
+    RiskLevel,
+)
 from .exceptions import (
     AccessDeniedError,
     AuthenticationError,
+    BankAccountError,
     InvalidOperationError,
     OperatingHoursError,
+    RiskBlockedError,
 )
 
 
@@ -149,12 +158,48 @@ class Client:
 class Bank:
     """Управлять счетами клиентов через проверяемые операции."""
 
-    def __init__(self, clock: Callable[[], datetime] | None = None) -> None:
+    def __init__(
+        self,
+        clock: Callable[[], datetime] | None = None,
+        *,
+        audit_log: AuditLog | None = None,
+        risk_analyzer: RiskAnalyzer | None = None,
+    ) -> None:
+        if audit_log is not None and not isinstance(audit_log, AuditLog):
+            raise InvalidOperationError("Нужен журнал аудита AuditLog")
+        if risk_analyzer is not None and not isinstance(risk_analyzer, RiskAnalyzer):
+            raise InvalidOperationError("Нужен анализатор риска RiskAnalyzer")
         self._clients: dict[str, Client] = {}
         self._accounts: dict[str, BankAccount] = {}
         self._clock = clock or datetime.now
         self._security_events: list[SecurityEvent] = []
         self._balance_history: list[BalancePoint] = []
+        self._audit_log = audit_log if audit_log is not None else AuditLog()
+        self._risk_analyzer = (
+            risk_analyzer if risk_analyzer is not None else RiskAnalyzer()
+        )
+        self._risk_context_bound = False
+
+    @property
+    def audit_log(self) -> AuditLog:
+        return self._audit_log
+
+    @property
+    def risk_analyzer(self) -> RiskAnalyzer:
+        return self._risk_analyzer
+
+    def _bind_risk_context(self, log: AuditLog, analyzer: RiskAnalyzer) -> None:
+        """Использовать один журнал и правила для снятий и переводов."""
+        if (
+            (log is not self._audit_log or analyzer is not self._risk_analyzer)
+            and (self._risk_context_bound or self._audit_log.entries)
+        ):
+            raise InvalidOperationError(
+                "Нельзя заменить журнал или анализатор после начала работы"
+            )
+        self._audit_log = log
+        self._risk_analyzer = analyzer
+        self._risk_context_bound = True
 
     @property
     def security_events(self) -> tuple[SecurityEvent, ...]:
@@ -334,11 +379,54 @@ class Bank:
     def withdraw(
         self, client_id: str, password: str, account_number: str, amount: Amount
     ) -> Decimal:
-        account = self._account_operation(
-            client_id, password, account_number, "withdraw"
+        client = self._authorized_client(client_id, password)
+        account = self._owned_account(client, account_number)
+        value = _valid_amount(amount)
+        now = self.current_time()
+        operation_id = str(uuid4())
+        assessment = self._risk_analyzer.assess_withdrawal(
+            client_id, operation_id, value, account.currency, now
         )
-        balance = account.withdraw(amount)
+        self._risk_analyzer.record_attempt(client_id, operation_id, now)
+        self._audit_log.record(
+            AuditEventType.RISK_ASSESSED, assessment.severity,
+            client_id, operation_id, now,
+            {
+                "operation": "withdraw",
+                "risk_level": assessment.level.value,
+                "reasons": ",".join(reason.value for reason in assessment.reasons),
+                "amount": str(value),
+                "currency": account.currency.value,
+            },
+        )
+        try:
+            self._ensure_operating_hours(client, "withdraw")
+            if assessment.level is RiskLevel.HIGH:
+                self._record_suspicious(
+                    client, "withdraw", "Высокий риск снятия"
+                )
+                raise RiskBlockedError("Снятие заблокировано: высокий риск")
+            balance = account.withdraw(value)
+        except BankAccountError as exc:
+            event_type = (
+                AuditEventType.WITHDRAWAL_BLOCKED
+                if isinstance(exc, (OperatingHoursError, RiskBlockedError))
+                else AuditEventType.WITHDRAWAL_FAILED
+            )
+            self._audit_log.record(
+                event_type,
+                (AuditSeverity.CRITICAL if isinstance(exc, RiskBlockedError)
+                 else AuditSeverity.WARNING),
+                client_id, operation_id, now,
+                {"error_type": type(exc).__name__, "reason": str(exc)},
+            )
+            raise
         self._record_balance(account, "withdraw")
+        self._audit_log.record(
+            AuditEventType.WITHDRAWAL_COMPLETED, AuditSeverity.INFO,
+            client_id, operation_id, now,
+            {"amount": str(value), "currency": account.currency.value},
+        )
         return balance
 
     def _transfer(
@@ -410,7 +498,7 @@ class Bank:
         )
         if not isinstance(account, SavingsAccount):
             raise InvalidOperationError("Это не сберегательный счёт")
-        interest = account.apply_monthly_interest()
+        interest = account.apply_monthly_interest(self.current_time())
         self._record_balance(account, "interest")
         return interest
 

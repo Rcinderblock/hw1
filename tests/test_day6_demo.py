@@ -68,7 +68,7 @@ class Day6DemoTests(unittest.TestCase):
         text = self.audit_path.read_text(encoding="utf-8")
         rows = [json.loads(line) for line in text.splitlines()]
         self.assertEqual(len(rows), len(self.result.audit_log.entries))
-        self.assertEqual(len(rows), 125)
+        self.assertEqual(len(rows), 127)
         self.assertNotIn("demo-0", text)
         self.assertNotIn("wrong", text)
 

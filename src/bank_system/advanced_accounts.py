@@ -1,6 +1,7 @@
 """Сберегательный, премиальный и инвестиционный счета."""
 
 from collections.abc import Mapping
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
 from .accounts import AccountStatus, Amount, BankAccount, Currency, _valid_amount
@@ -15,7 +16,10 @@ def _valid_rate(value: Amount, *, allow_negative: bool = False) -> Decimal:
         rate = Decimal(str(value))
     except InvalidOperation as exc:
         raise InvalidOperationError("Ставка должна быть числом") from exc
-    if not rate.is_finite() or (rate < 0 and not allow_negative):
+    if (
+        not rate.is_finite()
+        or (rate < -1 if allow_negative else not 0 <= rate <= 1)
+    ):
         raise InvalidOperationError("Недопустимая ставка")
     return rate
 
@@ -36,6 +40,7 @@ class SavingsAccount(BankAccount):
         super().__init__(owner, initial_balance, status, account_number, currency)
         self._min_balance = _valid_amount(min_balance, allow_zero=True)
         self._monthly_interest_rate = _valid_rate(monthly_interest_rate)
+        self._last_interest_period: tuple[int, int] | None = None
         if self.balance < self._min_balance:
             raise InvalidOperationError("Начальный баланс меньше минимального остатка")
 
@@ -47,11 +52,21 @@ class SavingsAccount(BankAccount):
     def monthly_interest_rate(self) -> Decimal:
         return self._monthly_interest_rate
 
-    def apply_monthly_interest(self) -> Decimal:
+    def apply_monthly_interest(self, at: datetime | None = None) -> Decimal:
         """Начислить доход на текущий баланс и вернуть сумму начисления."""
         self._ensure_active()
+        at = datetime.now() if at is None else at
+        if not isinstance(at, datetime) or at.tzinfo is not None:
+            raise InvalidOperationError("Нужно время без часового пояса")
+        period = (at.year, at.month)
+        if (
+            self._last_interest_period is not None
+            and period <= self._last_interest_period
+        ):
+            raise InvalidOperationError("Доход за этот месяц уже начислен")
         interest = self.balance * self.monthly_interest_rate
         self._balance += interest
+        self._last_interest_period = period
         return interest
 
     def withdraw(self, amount: Amount) -> Decimal:

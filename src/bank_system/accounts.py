@@ -70,14 +70,16 @@ class AbstractAccount(ABC):
             # Номер получается из UUID, а полный UUID остаётся уникальным ID.
             account_number = f"{self._account_id.int % 10**12:012d}"
         elif not isinstance(account_number, str) or not fullmatch(
-            r"[0-9]{4,20}", account_number
+            r"[0-9]{5,20}", account_number
         ):
-            raise InvalidOperationError("Номер счёта: от 4 до 20 цифр")
+            raise InvalidOperationError("Номер счёта: от 5 до 20 цифр")
 
         self._account_number = account_number
         self._owner = owner.strip()
         self._balance = _valid_amount(initial_balance, allow_zero=True)
         self._status = parsed_status
+        if self._status is AccountStatus.CLOSED and self._balance:
+            raise InvalidOperationError("Закрытый счёт не может иметь остаток")
 
     @property
     def account_id(self) -> UUID:

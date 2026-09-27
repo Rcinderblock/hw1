@@ -7,6 +7,7 @@ from bank_system import (
     Currency,
     PremiumAccount,
     RetryableTransactionError,
+    RiskAnalyzer,
     SavingsAccount,
     TransactionProcessor,
     TransactionQueue,
@@ -16,7 +17,14 @@ from bank_system import (
 
 def main() -> None:
     current_time = [datetime(2026, 1, 1, 12, 0)]
-    bank = Bank(clock=lambda: current_time[0])
+    # В демонстрации очереди пороги риска выше сумм этого сценария.
+    bank = Bank(
+        clock=lambda: current_time[0],
+        risk_analyzer=RiskAnalyzer(
+            large_amounts={currency: "100000" for currency in Currency},
+            frequent_count=100,
+        ),
+    )
     anna = bank.add_client("Анна Иванова", 30, {"email": "a@example.test"}, "a")
     boris = bank.add_client("Борис Петров", 30, {"email": "b@example.test"}, "b")
 

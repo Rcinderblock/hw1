@@ -41,7 +41,7 @@ class BalanceHistoryTests(unittest.TestCase):
         bank.deposit(first.client_id, "a", number, "25")
         bank.withdraw(first.client_id, "a", number, "10")
         with self.assertRaises(InsufficientFundsError):
-            bank.withdraw(first.client_id, "a", number, "1000")
+            bank.withdraw(first.client_id, "a", number, "150")
         bank._transfer(number, other, Decimal("5"), Decimal("5"), Decimal(0))
 
         points = bank.get_balance_history(first.client_id, "a", number)

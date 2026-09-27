@@ -260,14 +260,13 @@ class AuditedTransactionTests(unittest.TestCase):
 
     def test_file_write_failure_does_not_change_completed_transfer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            broken_log = AuditLog(directory)  # Путь указывает на каталог.
-            self.processor.audit_log = broken_log
+            self.log.path = Path(directory)  # Путь указывает на каталог.
             transaction = self.submit("10")
             self.processor.process_ready()
             self.assertEqual(transaction.status, TransactionStatus.COMPLETED)
             self.assertEqual(self.balance(self.source), Decimal("4990"))
-            self.assertEqual(len(broken_log.entries), 3)
-            self.assertEqual(len(broken_log.persistence_errors), 3)
+            self.assertEqual(len(self.log.entries), 3)
+            self.assertEqual(len(self.log.persistence_errors), 3)
 
 
 if __name__ == "__main__":
