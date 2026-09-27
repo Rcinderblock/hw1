@@ -7,6 +7,7 @@ import unittest
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from bank_system import (
     AccessDeniedError,
@@ -16,6 +17,7 @@ from bank_system import (
     BankAccount,
     InsufficientFundsError,
     InvalidOperationError,
+    Report,
     ReportBuilder,
     ReportKind,
     TransactionProcessor,
@@ -153,3 +155,49 @@ class ReportTests(unittest.TestCase):
             ReportBuilder(
                 self.result.bank, self.result.processor, AuditLog()
             )
+
+    def test_empty_reports_export_and_remain_snapshots(self) -> None:
+        bank = Bank(clock=lambda: datetime(2026, 1, 1, 12))
+        log = AuditLog()
+        processor = TransactionProcessor(bank, TransactionQueue(), audit_log=log)
+        builder = ReportBuilder(bank, processor, log)
+        empty_bank, empty_risk = builder.bank_report(), builder.risk_report()
+        client = bank.add_client("Анна", 20, {"email": "a@test"}, "a")
+        empty_client = builder.client_report(client.client_id, "a")
+        self.assertEqual(empty_bank.data["accounts"]["clients"], 0)
+        self.assertEqual(empty_client.data["accounts"], [])
+        with tempfile.TemporaryDirectory() as directory:
+            for report in (empty_bank, empty_risk, empty_client):
+                path = builder.export_to_json(
+                    report, Path(directory) / f"{report.kind.value}.json"
+                )
+                self.assertEqual(json.loads(path.read_text()), report.as_dict())
+                builder.save_charts(report, directory)
+
+    def test_ranking_chart_keeps_clients_with_duplicate_names_separate(self) -> None:
+        from matplotlib.figure import Figure
+
+        report = Report(ReportKind.BANK, "Банк", "2026-01-01T12:00:00", {
+            "accounts": {"by_type": {"BankAccount": 2}},
+            "top_clients_by_currency": {"RUB": [
+                {"client_id": "first", "full_name": "Анна Иванова", "total": "200"},
+                {"client_id": "second", "full_name": "Анна Иванова", "total": "100"},
+            ]},
+        })
+        positions = []
+        savefig = Figure.savefig
+
+        def inspect_bars(figure, path, **options):
+            if Path(path).name == "bank_top_clients_RUB.png":
+                positions.extend(
+                    bar.get_x() + bar.get_width() / 2
+                    for bar in figure.axes[0].patches
+                )
+            return savefig(figure, path, **options)
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            Figure, "savefig", inspect_bars
+        ):
+            self.builder.save_charts(report, directory)
+        self.assertEqual(len(positions), 2)
+        self.assertEqual(len(set(positions)), 2)

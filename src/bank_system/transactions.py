@@ -1,7 +1,7 @@
 """Очередь и обработка учебных переводов между счетами банка."""
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import Enum
@@ -19,8 +19,9 @@ from .audit import (
     RiskAssessment,
     RiskLevel,
 )
-from .bank import Bank
+from .bank import Bank, ClientStatus
 from .exceptions import (
+    AuthenticationError,
     BankAccountError,
     InvalidOperationError,
     OperatingHoursError,
@@ -50,51 +51,169 @@ class ProcessingError:
     reason: str
 
 
-@dataclass
 class Transaction:
-    """Запрос на перевод и результат его обработки."""
+    """Заявка с доступными только для чтения данными и результатом обработки."""
 
-    kind: TransactionType
-    amount: Decimal
-    currency: Currency
-    sender: str
-    recipient: str
-    created_at: datetime
-    scheduled_at: datetime
-    priority: int = 0
-    client_id: str = ""
-    transaction_id: str = field(default_factory=lambda: str(uuid4()))
-    fee: Decimal = field(default=Decimal(0), init=False)
-    converted_amount: Decimal | None = field(default=None, init=False)
-    status: TransactionStatus = field(
-        default=TransactionStatus.PENDING, init=False
-    )
-    rejection_reason: str | None = field(default=None, init=False)
-    updated_at: datetime = field(init=False)
-    finished_at: datetime | None = field(default=None, init=False)
-    attempts: int = field(default=0, init=False)
-    errors: list[ProcessingError] = field(default_factory=list, init=False)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.kind, TransactionType):
+    def __init__(
+        self,
+        kind: TransactionType,
+        amount: Amount,
+        currency: Currency,
+        sender: str,
+        recipient: str,
+        created_at: datetime,
+        scheduled_at: datetime,
+        priority: int = 0,
+        client_id: str = "",
+        transaction_id: str | None = None,
+    ) -> None:
+        if not isinstance(kind, TransactionType):
             raise InvalidOperationError("Неизвестный тип транзакции")
-        self.amount = _valid_amount(self.amount)
-        if not isinstance(self.currency, Currency):
+        if not isinstance(currency, Currency):
             raise InvalidOperationError("Неизвестная валюта транзакции")
-        if not self.sender or not self.recipient or self.sender == self.recipient:
+        if (
+            not isinstance(sender, str) or not sender
+            or not isinstance(recipient, str) or not recipient
+            or sender == recipient
+        ):
             raise InvalidOperationError("Нужны разные счета отправителя и получателя")
-        if isinstance(self.priority, bool) or not isinstance(self.priority, int):
+        if isinstance(priority, bool) or not isinstance(priority, int):
             raise InvalidOperationError("Приоритет должен быть целым числом")
         if (
-            not isinstance(self.created_at, datetime)
-            or not isinstance(self.scheduled_at, datetime)
-            or self.created_at.tzinfo is not None
-            or self.scheduled_at.tzinfo is not None
+            not isinstance(created_at, datetime)
+            or not isinstance(scheduled_at, datetime)
+            or created_at.tzinfo is not None
+            or scheduled_at.tzinfo is not None
         ):
             raise InvalidOperationError(
                 "Время транзакции должно быть без часового пояса"
             )
-        self.updated_at = self.created_at
+        if not isinstance(client_id, str):
+            raise InvalidOperationError("ID клиента должен быть строкой")
+        if transaction_id is not None and (
+            not isinstance(transaction_id, str) or not transaction_id
+        ):
+            raise InvalidOperationError("ID транзакции должен быть непустой строкой")
+        self._kind = kind
+        self._amount = _valid_amount(amount)
+        self._currency = currency
+        self._sender = sender
+        self._recipient = recipient
+        self._created_at = created_at
+        self._scheduled_at = scheduled_at
+        self._priority = priority
+        self._client_id = client_id
+        self._transaction_id = transaction_id or str(uuid4())
+        self._fee = Decimal(0)
+        self._converted_amount: Decimal | None = None
+        self._status = TransactionStatus.PENDING
+        self._rejection_reason: str | None = None
+        self._updated_at = created_at
+        self._finished_at: datetime | None = None
+        self._attempts = 0
+        self._errors: list[ProcessingError] = []
+
+    @property
+    def kind(self) -> TransactionType:
+        return self._kind
+
+    @property
+    def amount(self) -> Decimal:
+        return self._amount
+
+    @property
+    def currency(self) -> Currency:
+        return self._currency
+
+    @property
+    def sender(self) -> str:
+        return self._sender
+
+    @property
+    def recipient(self) -> str:
+        return self._recipient
+
+    @property
+    def created_at(self) -> datetime:
+        return self._created_at
+
+    @property
+    def scheduled_at(self) -> datetime:
+        return self._scheduled_at
+
+    @property
+    def priority(self) -> int:
+        return self._priority
+
+    @property
+    def client_id(self) -> str:
+        return self._client_id
+
+    @property
+    def transaction_id(self) -> str:
+        return self._transaction_id
+
+    @property
+    def fee(self) -> Decimal:
+        return self._fee
+
+    @property
+    def converted_amount(self) -> Decimal | None:
+        return self._converted_amount
+
+    @property
+    def status(self) -> TransactionStatus:
+        return self._status
+
+    @property
+    def rejection_reason(self) -> str | None:
+        return self._rejection_reason
+
+    @property
+    def updated_at(self) -> datetime:
+        return self._updated_at
+
+    @property
+    def finished_at(self) -> datetime | None:
+        return self._finished_at
+
+    @property
+    def attempts(self) -> int:
+        return self._attempts
+
+    @property
+    def errors(self) -> tuple[ProcessingError, ...]:
+        return tuple(self._errors)
+
+    def _start(self, at: datetime) -> None:
+        self._status = TransactionStatus.PROCESSING
+        self._updated_at = at
+        self._attempts += 1
+
+    def _cancel(self, at: datetime) -> None:
+        self._status = TransactionStatus.CANCELLED
+        self._updated_at = at
+        self._finished_at = at
+
+    def _retry(self, at: datetime, scheduled_at: datetime) -> None:
+        self._status = TransactionStatus.RETRYING
+        self._scheduled_at = scheduled_at
+        self._updated_at = at
+
+    def _complete(self, at: datetime, received: Decimal) -> None:
+        self._converted_amount = received
+        self._status = TransactionStatus.COMPLETED
+        self._updated_at = at
+        self._finished_at = at
+
+    def _record_error(self, at: datetime, error: Exception) -> None:
+        self._errors.append(ProcessingError(at, self.attempts, str(error)))
+
+    def _fail(self, at: datetime, reason: str) -> None:
+        self._status = TransactionStatus.FAILED
+        self._rejection_reason = reason
+        self._updated_at = at
+        self._finished_at = at
 
 
 class TransactionQueue:
@@ -143,19 +262,17 @@ class TransactionQueue:
             TransactionStatus.PENDING, TransactionStatus.RETRYING
         ):
             raise InvalidOperationError("Отменить можно только ожидающую транзакцию")
-        transaction.status = TransactionStatus.CANCELLED
-        transaction.updated_at = at
-        transaction.finished_at = at
+        transaction._cancel(at)
         return transaction
 
     def retry(
         self, transaction: Transaction, at: datetime, scheduled_at: datetime
     ) -> None:
+        if self._transactions.get(transaction.transaction_id) is not transaction:
+            raise InvalidOperationError("Заявка не принадлежит этой очереди")
         if transaction.status is not TransactionStatus.PROCESSING:
             raise InvalidOperationError("Повторить можно только обрабатываемую заявку")
-        transaction.status = TransactionStatus.RETRYING
-        transaction.scheduled_at = scheduled_at
-        transaction.updated_at = at
+        transaction._retry(at, scheduled_at)
         self._schedule(transaction)
 
     def pop_ready(self, now: datetime) -> Transaction | None:
@@ -175,8 +292,7 @@ class TransactionQueue:
             if transaction.status in (
                 TransactionStatus.PENDING, TransactionStatus.RETRYING
             ):
-                transaction.status = TransactionStatus.PROCESSING
-                transaction.updated_at = now
+                transaction._start(now)
                 return transaction
         return None
 
@@ -217,6 +333,7 @@ class TransactionProcessor:
             raise InvalidOperationError("Нужен анализатор риска RiskAnalyzer")
         self.bank = bank
         self.queue = queue
+        self._approved_transactions: dict[str, Transaction] = {}
         self.external_fee = _valid_amount(external_fee, allow_zero=True)
         self.max_attempts = max_attempts
         self.retry_delay = retry_delay
@@ -289,6 +406,7 @@ class TransactionProcessor:
                 self._record_block(transaction, now, error)
                 raise error
         self.queue.add(transaction)
+        self._approved_transactions[transaction.transaction_id] = transaction
         self._audit(
             AuditEventType.TRANSACTION_QUEUED, AuditSeverity.INFO,
             transaction, now,
@@ -333,11 +451,11 @@ class TransactionProcessor:
             isinstance(limit, bool) or not isinstance(limit, int) or limit < 1
         ):
             raise InvalidOperationError("Лимит должен быть положительным целым")
-        now = self.bank._clock()
-        if 0 <= now.hour < 5:
-            return []
         processed: list[Transaction] = []
         while limit is None or len(processed) < limit:
+            now = self.bank.current_time()
+            if 0 <= now.hour < 5:
+                break
             transaction = self.queue.pop_ready(now)
             if transaction is None:
                 break
@@ -346,8 +464,15 @@ class TransactionProcessor:
         return processed
 
     def _process_one(self, transaction: Transaction, now: datetime) -> None:
-        transaction.attempts += 1
         try:
+            if self._approved_transactions.get(
+                transaction.transaction_id
+            ) is not transaction:
+                raise AuthenticationError("Заявка не прошла проверку отправителя")
+            client = self.bank._clients.get(transaction.client_id)
+            if client is None or client.status is not ClientStatus.ACTIVE:
+                raise AuthenticationError("Отправитель не найден или заблокирован")
+            sender = self.bank._owned_account(client, transaction.sender)
             if self.risk_analyzer is not None:
                 assessment = self.risk_analyzer.assess(
                     transaction.client_id, transaction.transaction_id,
@@ -363,12 +488,11 @@ class TransactionProcessor:
                     )
                     self._record_block(transaction, now, error)
                     raise error
-            sender = self.bank._accounts[transaction.sender]
             recipient = self.bank._accounts[transaction.recipient]
             if sender.currency is not transaction.currency:
                 raise InvalidOperationError("Валюта отправителя изменилась")
             fee = (
-                self.external_fee
+                _valid_amount(self.external_fee, allow_zero=True)
                 if transaction.kind is TransactionType.EXTERNAL
                 else Decimal(0)
             )
@@ -379,18 +503,15 @@ class TransactionProcessor:
                 rate = self.exchange_rates.get(pair)
                 if rate is None:
                     raise InvalidOperationError("Нет курса для пары валют")
-                received = transaction.amount * rate
-            transaction.fee = fee
+                received = transaction.amount * _valid_amount(rate)
+            transaction._fee = fee
             if self.before_transfer is not None:
                 self.before_transfer(transaction)
             self.bank._transfer(
                 transaction.sender, transaction.recipient,
                 transaction.amount, received, fee,
             )
-            transaction.converted_amount = received
-            transaction.status = TransactionStatus.COMPLETED
-            transaction.updated_at = now
-            transaction.finished_at = now
+            transaction._complete(now, received)
             if self.risk_analyzer is not None:
                 self.risk_analyzer.record_success(
                     transaction.client_id, transaction.recipient
@@ -402,26 +523,26 @@ class TransactionProcessor:
                  "currency": transaction.currency.value},
             )
         except RetryableTransactionError as exc:
-            self._record_error(transaction, now, exc)
+            transaction._record_error(now, exc)
             if transaction.attempts < self.max_attempts:
                 self.queue.retry(transaction, now, now + self.retry_delay)
                 self._audit_error(
                     AuditEventType.RETRY_SCHEDULED, transaction, now, exc
                 )
             else:
-                self._fail(transaction, now, str(exc))
+                transaction._fail(now, str(exc))
                 self._audit_error(
                     AuditEventType.TRANSACTION_FAILED, transaction, now, exc
                 )
         except BankAccountError as exc:
-            self._record_error(transaction, now, exc)
-            self._fail(transaction, now, str(exc))
+            transaction._record_error(now, exc)
+            transaction._fail(now, str(exc))
             self._audit_error(
                 AuditEventType.TRANSACTION_FAILED, transaction, now, exc
             )
         except Exception as exc:
-            self._record_error(transaction, now, exc)
-            self._fail(transaction, now, str(exc))
+            transaction._record_error(now, exc)
+            transaction._fail(now, str(exc))
             self._audit_error(
                 AuditEventType.TRANSACTION_FAILED, transaction, now, exc
             )
@@ -482,18 +603,3 @@ class TransactionProcessor:
              "reason": str(error),
              "attempt": str(transaction.attempts)},
         )
-
-    @staticmethod
-    def _record_error(
-        transaction: Transaction, now: datetime, error: Exception
-    ) -> None:
-        transaction.errors.append(
-            ProcessingError(now, transaction.attempts, str(error))
-        )
-
-    @staticmethod
-    def _fail(transaction: Transaction, now: datetime, reason: str) -> None:
-        transaction.status = TransactionStatus.FAILED
-        transaction.rejection_reason = reason
-        transaction.updated_at = now
-        transaction.finished_at = now

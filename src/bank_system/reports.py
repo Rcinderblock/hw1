@@ -300,8 +300,13 @@ class ReportBuilder:
             for currency, rows in report.data["top_clients_by_currency"].items():
                 figure = Figure(figsize=(8, 4))
                 axis = figure.subplots()
-                axis.bar([row["full_name"] for row in rows],
+                positions = list(range(len(rows)))
+                axis.bar(positions,
                          [float(row["total"]) for row in rows])
+                axis.set_xticks(positions, [
+                    f"{index}. {row['full_name']}"
+                    for index, row in enumerate(rows, start=1)
+                ])
                 axis.set_title(f"Top clients ({currency})")
                 axis.set_ylabel(currency)
                 axis.tick_params(axis="x", labelrotation=15)

@@ -11,7 +11,7 @@ from hmac import compare_digest
 from secrets import token_bytes
 from uuid import uuid4
 
-from .accounts import AccountStatus, Amount, BankAccount, Currency
+from .accounts import AccountStatus, Amount, BankAccount, Currency, _valid_amount
 from .advanced_accounts import InvestmentAccount, SavingsAccount
 from .exceptions import (
     AccessDeniedError,
@@ -350,6 +350,9 @@ class Bank:
         fee: Decimal,
     ) -> None:
         """Проверить оба счёта, затем записать их новые остатки."""
+        amount = _valid_amount(amount)
+        received = _valid_amount(received)
+        fee = _valid_amount(fee, allow_zero=True)
         sender = self._accounts.get(sender_number)
         recipient = self._accounts.get(recipient_number)
         if sender is None or recipient is None or sender is recipient:
