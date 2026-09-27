@@ -121,6 +121,10 @@ class AbstractAccount(ABC):
 class BankAccount(AbstractAccount):
     """Обычный счёт с проверкой статуса и суммы операций."""
 
+    # Учебные лимиты на одну операцию; дочерние классы могут их увеличить.
+    MAX_DEPOSIT = Decimal("10000")
+    MAX_WITHDRAWAL = Decimal("5000")
+
     def __init__(
         self,
         owner: str,
@@ -144,12 +148,16 @@ class BankAccount(AbstractAccount):
     def deposit(self, amount: Amount) -> Decimal:
         self._ensure_active()
         value = _valid_amount(amount)
+        if value > self.MAX_DEPOSIT:
+            raise InvalidOperationError("Превышен лимит пополнения")
         self._balance += value
         return self._balance
 
     def withdraw(self, amount: Amount) -> Decimal:
         self._ensure_active()
         value = _valid_amount(amount)
+        if value > self.MAX_WITHDRAWAL:
+            raise InvalidOperationError("Превышен лимит снятия")
         if value > self._balance:
             raise InsufficientFundsError("Недостаточно средств для снятия")
         self._balance -= value
@@ -164,6 +172,8 @@ class BankAccount(AbstractAccount):
             "status": self.status.value,
             "balance": self.balance,
             "currency": self.currency.value,
+            "deposit_limit": self.MAX_DEPOSIT,
+            "withdrawal_limit": self.MAX_WITHDRAWAL,
         }
 
     def __str__(self) -> str:

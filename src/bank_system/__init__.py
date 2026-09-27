@@ -1,6 +1,7 @@
 """Учебная модель банковских счетов."""
 
 from .accounts import AbstractAccount, AccountStatus, BankAccount, Currency
+from .advanced_accounts import InvestmentAccount, PremiumAccount, SavingsAccount
 from .exceptions import (
     AccountClosedError,
     AccountFrozenError,
@@ -17,4 +18,7 @@ __all__ = [
     "Currency",
     "InsufficientFundsError",
     "InvalidOperationError",
+    "InvestmentAccount",
+    "PremiumAccount",
+    "SavingsAccount",
 ]
