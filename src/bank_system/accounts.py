@@ -168,6 +168,17 @@ class BankAccount(AbstractAccount):
         self._balance -= value
         return self._balance
 
+    def _check_transfer_out(self, amount: Decimal, fee: Decimal) -> None:
+        """Проверить списание перевода до изменения любого из двух счетов."""
+        self._ensure_active()
+        if amount > self.MAX_WITHDRAWAL:
+            raise InvalidOperationError("Превышен лимит перевода")
+        if self.balance < 0 or amount + fee > self.balance:
+            raise InsufficientFundsError("Недостаточно средств для перевода")
+
+    def _check_transfer_in(self) -> None:
+        self._ensure_active()
+
     def freeze(self) -> None:
         if self.status is AccountStatus.CLOSED:
             raise AccountClosedError("Закрытый счёт нельзя заморозить")

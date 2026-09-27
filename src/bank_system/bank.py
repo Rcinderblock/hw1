@@ -272,6 +272,28 @@ class Bank:
         )
         return account.withdraw(amount)
 
+    def _transfer(
+        self,
+        sender_number: str,
+        recipient_number: str,
+        amount: Decimal,
+        received: Decimal,
+        fee: Decimal,
+    ) -> None:
+        """Проверить оба счёта, затем записать их новые остатки."""
+        sender = self._accounts.get(sender_number)
+        recipient = self._accounts.get(recipient_number)
+        if sender is None or recipient is None or sender is recipient:
+            raise InvalidOperationError("Неверные счета перевода")
+        sender._check_transfer_out(amount, fee)
+        recipient._check_transfer_in()
+        # После проверок вычисления не вызывают внешних действий; оба остатка
+        # меняются только на завершающем шаге учебной модели в памяти.
+        new_sender_balance = sender.balance - amount - fee
+        new_recipient_balance = recipient.balance + received
+        sender._balance = new_sender_balance
+        recipient._balance = new_recipient_balance
+
     def allocate_to_asset(
         self,
         client_id: str,

@@ -11,6 +11,15 @@ from .exceptions import (
     InsufficientFundsError,
     InvalidOperationError,
     OperatingHoursError,
+    RetryableTransactionError,
+)
+from .transactions import (
+    ProcessingError,
+    Transaction,
+    TransactionProcessor,
+    TransactionQueue,
+    TransactionStatus,
+    TransactionType,
 )
 
 __all__ = [
@@ -29,7 +38,14 @@ __all__ = [
     "InvalidOperationError",
     "InvestmentAccount",
     "OperatingHoursError",
+    "ProcessingError",
     "PremiumAccount",
+    "RetryableTransactionError",
     "SavingsAccount",
     "SecurityEvent",
+    "Transaction",
+    "TransactionProcessor",
+    "TransactionQueue",
+    "TransactionStatus",
+    "TransactionType",
 ]

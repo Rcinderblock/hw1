@@ -61,6 +61,11 @@ class SavingsAccount(BankAccount):
             raise InsufficientFundsError("Снятие нарушит минимальный остаток")
         return super().withdraw(value)
 
+    def _check_transfer_out(self, amount: Decimal, fee: Decimal) -> None:
+        super()._check_transfer_out(amount, fee)
+        if self.balance - amount - fee < self.min_balance:
+            raise InsufficientFundsError("Перевод нарушит минимальный остаток")
+
     def get_account_info(self) -> dict[str, object]:
         info = super().get_account_info()
         info.update(
@@ -115,6 +120,13 @@ class PremiumAccount(BankAccount):
             raise InsufficientFundsError("Превышен допустимый овердрафт")
         self._balance -= total_debit
         return self.balance
+
+    def _check_transfer_out(self, amount: Decimal, fee: Decimal) -> None:
+        self._ensure_active()
+        if amount > self.MAX_WITHDRAWAL:
+            raise InvalidOperationError("Превышен лимит перевода")
+        if self.balance - amount - fee < -self.overdraft_limit:
+            raise InsufficientFundsError("Превышен допустимый овердрафт")
 
     def get_account_info(self) -> dict[str, object]:
         info = super().get_account_info()

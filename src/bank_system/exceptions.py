@@ -31,3 +31,7 @@ class AccessDeniedError(BankAccountError):
 
 class OperatingHoursError(BankAccountError):
     """Операция запрещена в ночные часы."""
+
+
+class RetryableTransactionError(BankAccountError):
+    """Временная ошибка обработки, после которой допустима повторная попытка."""
