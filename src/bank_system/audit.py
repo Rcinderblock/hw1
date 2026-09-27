@@ -265,10 +265,13 @@ class AuditReporter:
     def __init__(self, log: AuditLog) -> None:
         self.log = log
 
-    def suspicious_operations(self) -> tuple[AuditEntry, ...]:
+    def suspicious_operations(
+        self, client_id: str | None = None
+    ) -> tuple[AuditEntry, ...]:
         assessments = self.log.filter(
             event_type=AuditEventType.RISK_ASSESSED,
             min_severity=AuditSeverity.WARNING,
+            client_id=client_id,
         )
         by_transaction: dict[str, AuditEntry] = {}
         for entry in assessments:

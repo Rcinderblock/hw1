@@ -10,8 +10,10 @@ from uuid import uuid4
 
 from .accounts import Amount, Currency, _valid_amount
 from .audit import (
+    AuditEntry,
     AuditEventType,
     AuditLog,
+    AuditReporter,
     AuditSeverity,
     RiskAnalyzer,
     RiskAssessment,
@@ -126,6 +128,14 @@ class TransactionQueue:
             return self._transactions[transaction_id]
         except KeyError as exc:
             raise InvalidOperationError("Транзакция не найдена") from exc
+
+    def for_client(self, client_id: str) -> tuple[Transaction, ...]:
+        """Вернуть принятые заявки клиента в порядке постановки в очередь."""
+        return tuple(
+            transaction
+            for transaction in self._transactions.values()
+            if transaction.client_id == client_id
+        )
 
     def cancel(self, transaction_id: str, at: datetime) -> Transaction:
         transaction = self.get(transaction_id)
@@ -300,6 +310,22 @@ class TransactionProcessor:
             cancelled, now,
         )
         return cancelled
+
+    def get_history(
+        self, client_id: str, password: str
+    ) -> tuple[Transaction, ...]:
+        """Показать клиенту его заявки после проверки пароля."""
+        self.bank._authorized_client(client_id, password)
+        return self.queue.for_client(client_id)
+
+    def get_suspicious_operations(
+        self, client_id: str, password: str
+    ) -> tuple[AuditEntry, ...]:
+        """Показать клиенту его подозрительные попытки после проверки пароля."""
+        self.bank._authorized_client(client_id, password)
+        if self.audit_log is None:
+            return ()
+        return AuditReporter(self.audit_log).suspicious_operations(client_id)
 
     def process_ready(self, limit: int | None = None) -> list[Transaction]:
         """Выполнить готовые заявки; ночью оставить их в очереди до утра."""
