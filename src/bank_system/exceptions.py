@@ -35,3 +35,7 @@ class OperatingHoursError(BankAccountError):
 
 class RetryableTransactionError(BankAccountError):
     """Временная ошибка обработки, после которой допустима повторная попытка."""
+
+
+class RiskBlockedError(BankAccountError):
+    """Оценка риска запретила новую заявку или готовый перевод."""

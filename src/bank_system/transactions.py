@@ -9,11 +9,21 @@ from heapq import heappop, heappush
 from uuid import uuid4
 
 from .accounts import Amount, Currency, _valid_amount
+from .audit import (
+    AuditEventType,
+    AuditLog,
+    AuditSeverity,
+    RiskAnalyzer,
+    RiskAssessment,
+    RiskLevel,
+)
 from .bank import Bank
 from .exceptions import (
     BankAccountError,
     InvalidOperationError,
+    OperatingHoursError,
     RetryableTransactionError,
+    RiskBlockedError,
 )
 
 
@@ -50,6 +60,7 @@ class Transaction:
     created_at: datetime
     scheduled_at: datetime
     priority: int = 0
+    client_id: str = ""
     transaction_id: str = field(default_factory=lambda: str(uuid4()))
     fee: Decimal = field(default=Decimal(0), init=False)
     converted_amount: Decimal | None = field(default=None, init=False)
@@ -173,6 +184,8 @@ class TransactionProcessor:
         max_attempts: int = 3,
         retry_delay: timedelta = timedelta(minutes=1),
         before_transfer: Callable[[Transaction], None] | None = None,
+        audit_log: AuditLog | None = None,
+        risk_analyzer: RiskAnalyzer | None = None,
     ) -> None:
         if not isinstance(bank, Bank) or not isinstance(queue, TransactionQueue):
             raise InvalidOperationError("Нужны банк и очередь транзакций")
@@ -186,12 +199,22 @@ class TransactionProcessor:
             raise InvalidOperationError("Задержка повтора должна быть положительной")
         if exchange_rates is not None and not isinstance(exchange_rates, Mapping):
             raise InvalidOperationError("Курсы должны быть словарём пар валют")
+        if audit_log is not None and not isinstance(audit_log, AuditLog):
+            raise InvalidOperationError("Нужен журнал аудита AuditLog")
+        if risk_analyzer is not None and not isinstance(
+            risk_analyzer, RiskAnalyzer
+        ):
+            raise InvalidOperationError("Нужен анализатор риска RiskAnalyzer")
         self.bank = bank
         self.queue = queue
         self.external_fee = _valid_amount(external_fee, allow_zero=True)
         self.max_attempts = max_attempts
         self.retry_delay = retry_delay
         self.before_transfer = before_transfer
+        if audit_log is None and risk_analyzer is not None:
+            audit_log = AuditLog()
+        self.audit_log = audit_log
+        self.risk_analyzer = risk_analyzer
         self.exchange_rates: dict[tuple[Currency, Currency], Decimal] = {}
         for pair, value in (exchange_rates or {}).items():
             if (
@@ -216,7 +239,8 @@ class TransactionProcessor:
     ) -> Transaction:
         """Проверить владельца отправляющего счёта и поставить перевод в очередь."""
         client = self.bank._authorized_client(client_id, password)
-        self.bank._ensure_operating_hours(client, "submit_transaction")
+        if self.risk_analyzer is None:
+            self.bank._ensure_operating_hours(client, "submit_transaction")
         source = self.bank._owned_account(client, sender)
         if recipient not in self.bank._accounts:
             raise InvalidOperationError("Счёт получателя не найден")
@@ -234,8 +258,31 @@ class TransactionProcessor:
             created_at=now,
             scheduled_at=now if scheduled_at is None else scheduled_at,
             priority=priority,
+            client_id=client_id,
         )
+        if self.risk_analyzer is not None:
+            assessment = self.risk_analyzer.assess(
+                client_id, transaction.transaction_id, transaction.amount,
+                transaction.currency, recipient, now,
+            )
+            self.risk_analyzer.record_attempt(
+                client_id, transaction.transaction_id, now
+            )
+            self._record_assessment(transaction, assessment, now, "submission")
+            try:
+                self.bank._ensure_operating_hours(client, "submit_transaction")
+            except OperatingHoursError as exc:
+                self._record_block(transaction, now, exc)
+                raise
+            if assessment.level is RiskLevel.HIGH:
+                error = RiskBlockedError("Перевод заблокирован: высокий риск")
+                self._record_block(transaction, now, error)
+                raise error
         self.queue.add(transaction)
+        self._audit(
+            AuditEventType.TRANSACTION_QUEUED, AuditSeverity.INFO,
+            transaction, now,
+        )
         return transaction
 
     def cancel(
@@ -246,7 +293,13 @@ class TransactionProcessor:
         self.bank._ensure_operating_hours(client, "cancel_transaction")
         transaction = self.queue.get(transaction_id)
         self.bank._owned_account(client, transaction.sender)
-        return self.queue.cancel(transaction_id, self.bank._clock())
+        now = self.bank._clock()
+        cancelled = self.queue.cancel(transaction_id, now)
+        self._audit(
+            AuditEventType.TRANSACTION_CANCELLED, AuditSeverity.INFO,
+            cancelled, now,
+        )
+        return cancelled
 
     def process_ready(self, limit: int | None = None) -> list[Transaction]:
         """Выполнить готовые заявки; ночью оставить их в очереди до утра."""
@@ -269,6 +322,21 @@ class TransactionProcessor:
     def _process_one(self, transaction: Transaction, now: datetime) -> None:
         transaction.attempts += 1
         try:
+            if self.risk_analyzer is not None:
+                assessment = self.risk_analyzer.assess(
+                    transaction.client_id, transaction.transaction_id,
+                    transaction.amount, transaction.currency,
+                    transaction.recipient, now,
+                )
+                if assessment.level is RiskLevel.HIGH:
+                    self._record_assessment(
+                        transaction, assessment, now, "execution"
+                    )
+                    error = RiskBlockedError(
+                        "Перевод заблокирован перед исполнением: высокий риск"
+                    )
+                    self._record_block(transaction, now, error)
+                    raise error
             sender = self.bank._accounts[transaction.sender]
             recipient = self.bank._accounts[transaction.recipient]
             if sender.currency is not transaction.currency:
@@ -297,19 +365,97 @@ class TransactionProcessor:
             transaction.status = TransactionStatus.COMPLETED
             transaction.updated_at = now
             transaction.finished_at = now
+            if self.risk_analyzer is not None:
+                self.risk_analyzer.record_success(
+                    transaction.client_id, transaction.recipient
+                )
+            self._audit(
+                AuditEventType.TRANSACTION_COMPLETED, AuditSeverity.INFO,
+                transaction, now,
+                {"amount": str(transaction.amount),
+                 "currency": transaction.currency.value},
+            )
         except RetryableTransactionError as exc:
             self._record_error(transaction, now, exc)
             if transaction.attempts < self.max_attempts:
                 self.queue.retry(transaction, now, now + self.retry_delay)
+                self._audit_error(
+                    AuditEventType.RETRY_SCHEDULED, transaction, now, exc
+                )
             else:
                 self._fail(transaction, now, str(exc))
+                self._audit_error(
+                    AuditEventType.TRANSACTION_FAILED, transaction, now, exc
+                )
         except BankAccountError as exc:
             self._record_error(transaction, now, exc)
             self._fail(transaction, now, str(exc))
+            self._audit_error(
+                AuditEventType.TRANSACTION_FAILED, transaction, now, exc
+            )
         except Exception as exc:
             self._record_error(transaction, now, exc)
             self._fail(transaction, now, str(exc))
+            self._audit_error(
+                AuditEventType.TRANSACTION_FAILED, transaction, now, exc
+            )
             raise
+
+    def _audit(
+        self,
+        event_type: AuditEventType,
+        severity: AuditSeverity,
+        transaction: Transaction,
+        now: datetime,
+        details: Mapping[str, str] | None = None,
+    ) -> None:
+        if self.audit_log is not None:
+            self.audit_log.record(
+                event_type, severity, transaction.client_id,
+                transaction.transaction_id, now, details,
+            )
+
+    def _record_assessment(
+        self,
+        transaction: Transaction,
+        assessment: RiskAssessment,
+        now: datetime,
+        phase: str,
+    ) -> None:
+        self._audit(
+            AuditEventType.RISK_ASSESSED, assessment.severity,
+            transaction, now,
+            {
+                "risk_level": assessment.level.value,
+                "reasons": ",".join(reason.value for reason in assessment.reasons),
+                "amount": str(transaction.amount),
+                "currency": transaction.currency.value,
+                "phase": phase,
+            },
+        )
+
+    def _record_block(
+        self, transaction: Transaction, now: datetime, error: Exception
+    ) -> None:
+        self._audit(
+            AuditEventType.TRANSACTION_BLOCKED, AuditSeverity.CRITICAL,
+            transaction, now,
+            {"error_type": type(error).__name__, "reason": str(error)},
+        )
+
+    def _audit_error(
+        self,
+        event_type: AuditEventType,
+        transaction: Transaction,
+        now: datetime,
+        error: Exception,
+    ) -> None:
+        self._audit(
+            event_type, AuditSeverity.WARNING, transaction, now,
+            {"error_type": type(error).__name__,
+             "reason": str(error),
+             "attempt": str(transaction.attempts)},
+        )
 
     @staticmethod
     def _record_error(
