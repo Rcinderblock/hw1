@@ -169,6 +169,18 @@ class InvestmentAccount(BankAccount):
         self._portfolio[asset_type] += value
         return self._portfolio[asset_type]
 
+    def release_from_asset(self, asset_type: str, amount: Amount) -> Decimal:
+        """Вернуть виртуальную сумму из портфеля в свободные средства."""
+        self._ensure_active()
+        if asset_type not in self.ASSET_TYPES:
+            raise InvalidOperationError("Допустимые активы: stocks, bonds, etf")
+        value = _valid_amount(amount)
+        if value > self._portfolio[asset_type]:
+            raise InsufficientFundsError("В выбранном активе недостаточно средств")
+        self._portfolio[asset_type] -= value
+        self._balance += value
+        return self._portfolio[asset_type]
+
     def withdraw(self, amount: Amount) -> Decimal:
         self._ensure_active()
         value = _valid_amount(amount)
@@ -177,6 +189,11 @@ class InvestmentAccount(BankAccount):
                 "Снять можно только свободные средства, не средства портфеля"
             )
         return super().withdraw(value)
+
+    def close(self) -> Decimal:
+        if any(self._portfolio.values()):
+            raise InvalidOperationError("Перед закрытием освободите портфель")
+        return super().close()
 
     def project_yearly_growth(self, growth_rates: Mapping[str, Amount]) -> Decimal:
         """Вернуть ожидаемый прирост портфеля без изменения его стоимости."""

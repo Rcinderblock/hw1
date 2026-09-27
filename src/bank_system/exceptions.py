@@ -19,3 +19,15 @@ class InvalidOperationError(BankAccountError):
 
 class InsufficientFundsError(BankAccountError):
     """Для снятия недостаточно средств."""
+
+
+class AuthenticationError(BankAccountError):
+    """Клиент не прошёл проверку пароля или заблокирован."""
+
+
+class AccessDeniedError(BankAccountError):
+    """Клиент попытался обратиться к чужому счёту."""
+
+
+class OperatingHoursError(BankAccountError):
+    """Операция запрещена в ночные часы."""

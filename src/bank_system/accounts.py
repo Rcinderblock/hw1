@@ -145,6 +145,11 @@ class BankAccount(AbstractAccount):
     def currency(self) -> Currency:
         return self._currency
 
+    @property
+    def total_value(self) -> Decimal:
+        """Стоимость счёта для отчётов банка."""
+        return self.balance
+
     def deposit(self, amount: Amount) -> Decimal:
         self._ensure_active()
         value = _valid_amount(amount)
@@ -162,6 +167,33 @@ class BankAccount(AbstractAccount):
             raise InsufficientFundsError("Недостаточно средств для снятия")
         self._balance -= value
         return self._balance
+
+    def freeze(self) -> None:
+        if self.status is AccountStatus.CLOSED:
+            raise AccountClosedError("Закрытый счёт нельзя заморозить")
+        if self.status is AccountStatus.FROZEN:
+            raise InvalidOperationError("Счёт уже заморожен")
+        self._status = AccountStatus.FROZEN
+
+    def unfreeze(self) -> None:
+        if self.status is AccountStatus.CLOSED:
+            raise AccountClosedError("Закрытый счёт нельзя разморозить")
+        if self.status is AccountStatus.ACTIVE:
+            raise InvalidOperationError("Счёт уже активен")
+        self._status = AccountStatus.ACTIVE
+
+    def close(self) -> Decimal:
+        """Закрыть счёт и вернуть выданный клиенту свободный остаток."""
+        if self.status is AccountStatus.CLOSED:
+            raise AccountClosedError("Счёт уже закрыт")
+        if self.status is AccountStatus.FROZEN:
+            raise AccountFrozenError("Замороженный счёт нельзя закрыть")
+        if self.balance < 0:
+            raise InvalidOperationError("Перед закрытием нужно погасить долг")
+        payout = self.balance
+        self._balance = Decimal(0)
+        self._status = AccountStatus.CLOSED
+        return payout
 
     def get_account_info(self) -> dict[str, object]:
         return {
